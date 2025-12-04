@@ -34,17 +34,16 @@ class _KineticVoidPageState extends State<KineticVoidPage>
   );
 
   final List<Color> bandColors = [
-    Colors.redAccent,
-    Colors.orangeAccent,
-    Colors.yellow,
-    Colors.cyan,
-    Colors.purpleAccent,
+    Colors.redAccent, // 0: Sub-Bass
+    Colors.deepOrange, // 1: Bass
+    Colors.yellow, // 2: Mids (SMALLER NOW)
+    Colors.cyanAccent, // 3: High Mids
+    Colors.purpleAccent, // 4: Treble
   ];
 
   List<double> prevEnergyLevels = [0.0, 0.0, 0.0, 0.0, 0.0];
   List<double> energyLevels = [0.0, 0.0, 0.0, 0.0, 0.0];
   Offset gravity = Offset.zero;
-  DateTime lastHapticTime = DateTime.now();
 
   late Ticker _ticker;
   List<Particle> particles = [];
@@ -63,19 +62,34 @@ class _KineticVoidPageState extends State<KineticVoidPage>
 
   void _initParticles() {
     particles.clear();
-    // 800 Particles
-    for (int i = 0; i < 800; i++) {
-      int band = 0; // Force Red
+    for (int i = 0; i < 1000; i++) {
+      int band = _rng.nextInt(5);
+      double mass;
+      double startRadius;
+
+      if (band <= 1) {
+        // Red/Orange: Heavy & Large
+        mass = 1.0 + _rng.nextDouble() * 3.0;
+        startRadius = _rng.nextDouble() * 1.5 + 0.5; // 0.5 to 2.0
+      } else if (band == 2) {
+        // Yellow: Medium Mass, SMALLER SIZE
+        mass = 1.5 + _rng.nextDouble() * 1.5;
+        // Range reduced to 0.3 - 1.0 (Was 0.5 - 2.0)
+        startRadius = _rng.nextDouble() * 0.7 + 0.3;
+      } else {
+        // Cyan/Purple: Light
+        mass = 0.5 + _rng.nextDouble();
+        startRadius = _rng.nextDouble() * 1.5 + 0.5;
+      }
 
       particles.add(
         Particle(
           x: _rng.nextDouble() * 300,
-          y: 800 + _rng.nextDouble() * 100,
-          radius: _rng.nextDouble() * 1.5 + 0.5,
+          y: 1000,
+          radius: startRadius,
           bandIndex: band,
           baseColor: bandColors[band],
-          // Mass variance
-          massFactor: 1.0 + _rng.nextDouble() * 3.0,
+          massFactor: mass,
           randomOffset: _rng.nextDouble() * 100,
         ),
       );
@@ -89,10 +103,12 @@ class _KineticVoidPageState extends State<KineticVoidPage>
         for (int i = 0; i < 5; i++) {
           double raw = (rawValues[i] as double);
           prevEnergyLevels[i] = energyLevels[i];
+
           if (raw > energyLevels[i]) {
             energyLevels[i] = raw;
           } else {
-            energyLevels[i] -= (energyLevels[i] - raw) * 0.4;
+            double decay = (i == 2) ? 0.4 : 0.4;
+            energyLevels[i] -= (energyLevels[i] - raw) * decay;
           }
         }
       });
@@ -106,80 +122,94 @@ class _KineticVoidPageState extends State<KineticVoidPage>
     });
   }
 
-  void _checkImpact(double velocity) {
-    if (velocity.abs() > 40.0 &&
-        DateTime.now().difference(lastHapticTime).inMilliseconds > 100) {
-      lastHapticTime = DateTime.now();
-      _hapticChannel.invokeMethod('impact');
-    }
-  }
-
   void _updatePhysics() {
     setState(() {
       double width = MediaQuery.of(context).size.width;
       double height = MediaQuery.of(context).size.height;
 
-      // VERY STRONG GRAVITY (Keeps them grouped at bottom)
-      double baseGravityY = 5.0;
-
       for (var p in particles) {
         double myEnergy = energyLevels[p.bandIndex].clamp(0.0, 1.0);
         double transient = (myEnergy - prevEnergyLevels[p.bandIndex]);
 
-        // Gravity
-        p.vy += baseGravityY * (0.5 + (p.massFactor * 0.1));
+        // ============================================================
+        //  PHYSICS
+        // ============================================================
 
-        // --- REACT TO BEAT ---
-        if (transient > 0.05) {
-          // 1. HEIGHT DAMPING (The "Invisible Rubber Band")
-          // Calculate how close the particle is to the bottom (0.0 to 1.0)
-          // At bottom (height), ratio is 1.0. At top (0), ratio is 0.0.
-          double positionRatio = (p.y / height).clamp(0.0, 1.0);
+        // --- GROUP 1: RED & ORANGE ---
+        if (p.bandIndex <= 1) {
+          p.vy += 5.0 * (0.5 + (p.massFactor * 0.1));
 
-          // If particle is already high up (low positionRatio),
-          // we reduce the kick force significantly.
+          if (transient > 0.05) {
+            double posRatio = (p.y / height).clamp(0.0, 1.0);
+            double kick = transient * 200.0 * (posRatio * posRatio);
+            p.vy -= kick / p.massFactor;
+            p.vx += (_rng.nextDouble() - 0.5) * (kick * 0.1);
+          }
+          p.vx *= 0.93;
+          p.vy *= 0.93;
+        }
+        // --- GROUP 2: YELLOW (High Gate, Low Bounce) ---
+        else if (p.bandIndex == 2) {
+          p.vy += 4.0;
 
-          // 2. REDUCED KICK FORCE
-          // Base kick lowered to 90.0 (was 160.0, 250.0 before)
-          // Multiplied by positionRatio^2 to punish high particles
-          double kickForce = transient * 90.0 * (positionRatio * positionRatio);
+          if (transient > 0.08) {
+            double posRatio = (p.y / height).clamp(0.0, 1.0);
+            double kick = transient * 150.0 * (posRatio * posRatio);
 
-          p.vy -= kickForce / p.massFactor;
-          p.vx += (_rng.nextDouble() - 0.5) * (kickForce * 0.15);
+            p.vy -= kick / p.massFactor;
+            p.vx += (_rng.nextDouble() - 0.5) * (kick * 0.3);
+          }
+
+          p.vx *= 0.94;
+          p.vy *= 0.94;
+        }
+        // --- GROUP 3: CYAN & PURPLE ---
+        else {
+          p.vy += 2.0;
+          if (transient > 0.02) {
+            double posRatio = (p.y / height).clamp(0.0, 1.0);
+            double kick = transient * 300.0 * posRatio;
+            p.vy -= kick / p.massFactor;
+            p.vx += (_rng.nextDouble() - 0.5) * (kick * 0.8);
+          }
+          p.vx *= 0.96;
+          p.vy *= 0.96;
         }
 
-        // --- RADIUS & GLOW ---
-        p.targetRadius = (3.0 * myEnergy) + 1.0;
+        // ============================================================
+        //  VISUALS (SIZE TUNING)
+        // ============================================================
 
-        if (myEnergy > 0.6) {
-          p.color = Color.lerp(
-            p.baseColor,
-            Colors.white,
-            (myEnergy - 0.6) * 2.5,
-          )!;
+        if (p.bandIndex == 2) {
+          // YELLOW: Grows much less. Max size ~2.5
+          p.targetRadius = (2.0 * myEnergy) + 0.5;
         } else {
-          p.color = p.baseColor;
+          // OTHERS: Standard growth. Max size ~4.5
+          p.targetRadius = (3.5 * myEnergy) + 1.0;
         }
 
-        // --- KINEMATICS ---
+        p.color = p.baseColor;
+
         p.x += p.vx;
         p.y += p.vy;
-
         p.radius += (p.targetRadius - p.radius) * 0.2;
 
-        // HEAVY AIR RESISTANCE
-        // 0.93 creates a "thick" atmosphere, killing upward momentum fast
-        p.vx *= 0.93;
-        p.vy *= 0.93;
-
-        // --- FLOOR PHYSICS ---
+        // --- FLOOR ---
         if (p.y > height) {
           p.y = height;
-          p.vy = -p.vy * 0.05; // Almost no bounce
-          p.vx *= 0.4; // Very high friction on ground (stops sliding)
+          if (p.bandIndex <= 1) {
+            p.vy = -p.vy * 0.05;
+            p.vx *= 0.4;
+          } else if (p.bandIndex == 2) {
+            p.vy = -p.vy * 0.1;
+            p.vx *= 0.5;
+          } else {
+            p.vy = -p.vy * 0.3;
+            p.vx *= 0.8;
+          }
         }
 
-        // --- CEILING PHYSICS (Safety Net) ---
+        // --- CEILING ---
         if (p.y < 0) {
           p.y = 0;
           p.vy = p.vy.abs() * 0.5;
@@ -246,7 +276,7 @@ class VoidPainter extends CustomPainter {
         canvas.drawCircle(
           Offset(p.x, p.y),
           p.radius * 2.0,
-          Paint()..color = p.color.withOpacity(0.1),
+          Paint()..color = p.color.withOpacity(0.15),
         );
       }
       canvas.drawCircle(
