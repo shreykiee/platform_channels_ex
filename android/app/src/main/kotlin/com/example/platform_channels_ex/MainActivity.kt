@@ -26,12 +26,12 @@ class MainActivity: FlutterActivity() {
     private val SENSOR_CHANNEL = "com.kinetic.void/sensor"
     private val HAPTIC_CHANNEL = "com.kinetic.void/haptic"
 
-    // Audio State
+    // --- AUDIO STATE ---
     private var audioRecord: AudioRecord? = null
     private var recordingThread: Thread? = null
     private var isRecording = false
     private val SAMPLE_RATE = 44100
-    private val BUFFER_SIZE = 1024 // Power of 2 for FFT
+    private val BUFFER_SIZE = 1024 // Must be power of 2 for FFT
 
     private var audioSink: EventChannel.EventSink? = null
     private var sensorSink: EventChannel.EventSink? = null
@@ -40,7 +40,7 @@ class MainActivity: FlutterActivity() {
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // --- AUDIO CHANNEL ---
+        // 1. AUDIO CHANNEL (Streams 5-Band Spectrum)
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, AUDIO_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler {
                 override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -54,7 +54,7 @@ class MainActivity: FlutterActivity() {
             }
         )
 
-        // --- SENSOR CHANNEL ---
+        // 2. SENSOR CHANNEL (Streams Accelerometer)
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, SENSOR_CHANNEL).setStreamHandler(
             object : EventChannel.StreamHandler, SensorEventListener {
@@ -77,9 +77,10 @@ class MainActivity: FlutterActivity() {
             }
         )
 
-        // --- HAPTIC CHANNEL ---
+        // 3. HAPTIC CHANNEL (Triggers Physical Feedback)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, HAPTIC_CHANNEL).setMethodCallHandler { call, result ->
             if (call.method == "impact") {
+                // Crisp vibration for collisions
                 window.decorView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 result.success(null)
             } else {
@@ -115,19 +116,22 @@ class MainActivity: FlutterActivity() {
             while (isRecording) {
                 val readSize = audioRecord?.read(buffer, 0, BUFFER_SIZE) ?: 0
                 if (readSize > 0) {
-                    // Calculate Bass and Treble
-                    val (bass, treble) = fft.calculate(buffer)
+                    // Calculate 5 Bands
+                    val bands = fft.calculate(buffer)
                     
-                    // Logarithmic scaling for better visualization response
-                    // Bass needs a lower multiplier, Treble needs higher to be visible
-                    val finalBass = log10(bass + 1) * 0.8
-                    val finalTreble = log10(treble + 1) * 4.0
+                    // NORMALIZE & SCALING
+                    // Higher frequencies need higher multipliers to be visible
+                    val processed = listOf(
+                        log10(bands[0] + 1) * 0.8, // Band 0: Sub-Bass (Red)
+                        log10(bands[1] + 1) * 1.0, // Band 1: Bass (Orange)
+                        log10(bands[2] + 1) * 1.2, // Band 2: Mids (Yellow)
+                        log10(bands[3] + 1) * 1.8, // Band 3: High Mids (Cyan)
+                        log10(bands[4] + 1) * 3.0  // Band 4: Treble (Purple) - Huge Boost
+                    )
 
                     runOnUiThread {
-                        audioSink?.success(mapOf(
-                            "bass" to finalBass,
-                            "treble" to finalTreble
-                        ))
+                        // Send List<Double> to Flutter
+                        audioSink?.success(processed)
                     }
                 }
             }
@@ -145,7 +149,7 @@ class MainActivity: FlutterActivity() {
         recordingThread = null
     }
 
-    // Permission Logic
+    // --- PERMISSIONS ---
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 1 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
@@ -164,27 +168,20 @@ class MainActivity: FlutterActivity() {
     }
 }
 
-// --- FFT HELPER CLASS ---
-// Calculates Frequency Magnitude from raw PCM data
+// --- 5-BAND FFT HELPER ---
 class SimpleFFT(val n: Int) {
     val real = DoubleArray(n)
     val imag = DoubleArray(n)
 
-    fun calculate(buffer: ShortArray): Pair<Double, Double> {
+    fun calculate(buffer: ShortArray): List<Double> {
         // 1. Normalize
         for (i in 0 until n) {
             real[i] = buffer[i].toDouble() / 32768.0
             imag[i] = 0.0
         }
 
-        // 2. FFT (Simple implementation)
-        var i = 0
-        var j = 0
-        var k = 0
-        var tx = 0.0
-        var ty = 0.0
-        
-        // Bit reversal
+        // 2. FFT Math (Cooley-Tukey)
+        var i = 0; var j = 0; var k = 0; var tx = 0.0; var ty = 0.0
         j = 0
         for (i in 0 until n - 1) {
             if (i < j) {
@@ -195,8 +192,6 @@ class SimpleFFT(val n: Int) {
             while (k <= j) { j -= k; k /= 2 }
             j += k
         }
-
-        // Computation
         var l = 1
         while (l < n) {
             val step = l * 2
@@ -219,19 +214,33 @@ class SimpleFFT(val n: Int) {
             l = step
         }
 
-        // 3. Aggregate Bins
-        // Bass (Low Freq): Bins 1-5 (~40Hz - 200Hz)
-        var bassSum = 0.0
-        for (k in 1..3) { 
-            bassSum += sqrt(real[k].pow(2) + imag[k].pow(2)) 
-        }
+        // 3. AGGREGATE BINS INTO 5 BANDS
+        // Sample Rate 44100 / Buffer 1024 = ~43Hz per bin
+        
+        // Band 0: Sub-Bass (0 - 86Hz) -> Bins 0-2
+        var b0 = 0.0
+        for (k in 0..2) b0 += mag(k)
+        
+        // Band 1: Bass (86 - 250Hz) -> Bins 3-6
+        var b1 = 0.0
+        for (k in 3..6) b1 += mag(k)
+        
+        // Band 2: Low Mids (250 - 600Hz) -> Bins 7-14
+        var b2 = 0.0
+        for (k in 7..14) b2 += mag(k)
+        
+        // Band 3: High Mids (600 - 2000Hz) -> Bins 15-46
+        var b3 = 0.0
+        for (k in 15..46) b3 += mag(k)
+        
+        // Band 4: Treble (2000Hz +) -> Bins 47-150
+        var b4 = 0.0
+        for (k in 47..150) b4 += mag(k)
 
-        // Treble (High Freq): Bins 60-150 (~2.5kHz - 6kHz)
-        var trebleSum = 0.0
-        for (k in 40 until min(120, n/2)) { // Shifted range down slightly to catch snare drums
-            trebleSum += sqrt(real[k].pow(2) + imag[k].pow(2))
-        }
+        return listOf(b0, b1, b2, b3, b4)
+    }
 
-        return Pair(bassSum, trebleSum)
+    private fun mag(i: Int): Double {
+        return sqrt(real[i].pow(2) + imag[i].pow(2))
     }
 }
