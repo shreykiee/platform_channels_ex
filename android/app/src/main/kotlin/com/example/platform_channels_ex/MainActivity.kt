@@ -121,7 +121,7 @@ class MainActivity: FlutterActivity() {
                     // Logarithmic scaling for better visualization response
                     // Bass needs a lower multiplier, Treble needs higher to be visible
                     val finalBass = log10(bass + 1) * 0.8
-                    val finalTreble = log10(treble + 1) * 1.5
+                    val finalTreble = log10(treble + 1) * 4.0
 
                     runOnUiThread {
                         audioSink?.success(mapOf(
@@ -222,13 +222,13 @@ class SimpleFFT(val n: Int) {
         // 3. Aggregate Bins
         // Bass (Low Freq): Bins 1-5 (~40Hz - 200Hz)
         var bassSum = 0.0
-        for (k in 1..5) { 
+        for (k in 1..3) { 
             bassSum += sqrt(real[k].pow(2) + imag[k].pow(2)) 
         }
 
         // Treble (High Freq): Bins 60-150 (~2.5kHz - 6kHz)
         var trebleSum = 0.0
-        for (k in 60 until min(150, n/2)) {
+        for (k in 40 until min(120, n/2)) { // Shifted range down slightly to catch snare drums
             trebleSum += sqrt(real[k].pow(2) + imag[k].pow(2))
         }
 

@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:math';
-import 'dart:ui';
+import 'dart:ui'; // Needed for Color.lerp
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -34,13 +34,26 @@ class _KineticVoidPageState extends State<KineticVoidPage>
     'com.kinetic.void/haptic',
   );
 
-  // --- STATE ---
+  // --- TUNING KNOBS (Fixed) ---
+  // 1. SENSITIVITY: Set to 1.0 (100%).
+  //    We accept the full volume now to ensure movement.
+  final double sensitivity = 1.0;
+
+  // 2. THRESHOLD: Lowered to 0.15.
+  //    Everything above 15% volume triggers movement. Silence ignores it.
+  final double minThreshold = 0.15;
+
+  // 3. FRICTION: High (0.88).
+  //    Stops particles quickly so they don't float around endlessly.
+  final double friction = 0.88;
+
+  // --- STATE DATA ---
   double bassLevel = 0.0;
   double trebleLevel = 0.0;
   Offset gravity = Offset.zero;
   DateTime lastHapticTime = DateTime.now();
 
-  // --- PHYSICS ---
+  // --- PHYSICS ENGINE ---
   late Ticker _ticker;
   List<Particle> particles = [];
   final Random _rng = Random();
@@ -62,15 +75,16 @@ class _KineticVoidPageState extends State<KineticVoidPage>
   void _initParticles() {
     particles.clear();
     for (int i = 0; i < 150; i++) {
-      // 60% Bass (Blue), 40% Treble (Gold)
+      // 60% Bass (Blue/Cyan), 40% Treble (Orange/Gold)
       bool isBass = _rng.nextDouble() > 0.4;
+
       particles.add(
         Particle(
           x: _rng.nextDouble() * 300,
           y: _rng.nextDouble() * 500,
           radius: _rng.nextDouble() * 2 + 1,
           isBassType: isBass,
-          baseColor: isBass ? Colors.cyanAccent : Colors.amberAccent,
+          baseColor: isBass ? Colors.cyanAccent : Colors.orangeAccent,
         ),
       );
     }
@@ -80,35 +94,34 @@ class _KineticVoidPageState extends State<KineticVoidPage>
     _audioSub = _audioChannel.receiveBroadcastStream().listen((event) {
       final Map<dynamic, dynamic> data = event;
       setState(() {
-        // TARGET VALUES
-        double targetBass = data['bass'] as double;
-        double targetTreble = data['treble'] as double;
+        // 1. APPLY SENSITIVITY
+        double rawBass = (data['bass'] as double) * sensitivity;
+        double rawTreble = (data['treble'] as double) * sensitivity;
 
-        // ATTACK/DECAY LOGIC
-        // If new beat is louder, jump instantly (Attack).
-        // If quieter, fade out fast (Decay).
-        if (targetBass > bassLevel) {
-          bassLevel = targetBass; // Instant hit
+        // 2. ATTACK / DECAY
+        // Instant Attack (rising), Fast Decay (falling)
+        if (rawBass > bassLevel) {
+          bassLevel = rawBass;
         } else {
-          bassLevel -= (bassLevel - targetBass) * 0.1; // Fast fade
+          bassLevel -= (bassLevel - rawBass) * 0.15;
         }
 
-        // Treble can stay smooth
-        trebleLevel += (targetTreble - trebleLevel) * 0.2;
+        trebleLevel += (rawTreble - trebleLevel) * 0.2;
       });
     }, onError: (e) => print("Audio Error: $e"));
 
     _sensorSub = _sensorChannel.receiveBroadcastStream().listen((event) {
       final List<dynamic> values = event;
       setState(() {
+        // Reduced sensor influence slightly
         gravity = Offset(values[0] * 1.5, values[1] * 1.5);
       });
     });
   }
 
   void _checkImpact(double velocity) {
-    // Only vibrate on hard hits
-    if (velocity.abs() > 25.0 &&
+    // Only vibrate on hard hits (> 25.0 velocity)
+    if (velocity.abs() > 40.0 &&
         DateTime.now().difference(lastHapticTime).inMilliseconds > 100) {
       lastHapticTime = DateTime.now();
       _hapticChannel.invokeMethod('impact');
@@ -117,93 +130,94 @@ class _KineticVoidPageState extends State<KineticVoidPage>
 
   void _updatePhysics() {
     setState(() {
-      // 1. THE "SNAP" CURVE
-      // We raise the floor to 0.45. Anything below this is SILENCE.
+      // --- 1. CALCULATE FORCES WITH EXPONENTIAL RAMP ---
       double activeBass = 0.0;
-      if (bassLevel > 0.45) {
-        double normalized = (bassLevel - 0.45) / 0.55;
-        // CUBIC CURVE: This is the secret.
-        // Input 0.1 -> Output 0.001 (Basically zero)
-        // Input 0.9 -> Output 0.72 (Huge)
-        // This separates "Noise" from "Beats"
-        activeBass = normalized * normalized * normalized;
+
+      // Threshold: 0.20 (Ignore quiet room noise)
+      if (bassLevel > 0.20) {
+        double normalized = (bassLevel - 0.20) / 0.80;
+        if (normalized > 1.0) normalized = 1.0;
+
+        // THE MAGIC FIX: Power of 4
+        // Input 0.5 (Medium) -> Output 0.06 (Tiny energy)
+        // Input 0.8 (Loud)   -> Output 0.40 (40% energy)
+        // Input 1.0 (Max)    -> Output 1.00 (100% energy)
+        // This creates the "Slow Increase" you asked for.
+        activeBass = normalized * normalized * normalized * normalized;
       }
 
       double activeTreble = 0.0;
-      if (trebleLevel > 0.2) {
-        activeTreble = (trebleLevel - 0.2) / 0.8;
+      if (trebleLevel > 0.1) {
+        activeTreble = (trebleLevel - 0.1) / 0.9;
+        if (activeTreble > 1.0) activeTreble = 1.0;
       }
 
-      // 2. HEAVY GRAVITY (Pulls them down fast after a jump)
+      // Base Gravity
       double baseGravityY = 0.8;
 
       for (var p in particles) {
-        // Sensor Gravity + Base Gravity
+        // Gravity
         p.vx += gravity.dx * 0.1;
         p.vy += (gravity.dy * 0.1) + baseGravityY;
 
-        // --- BASS PARTICLES ---
         if (p.isBassType) {
-          // STRICT GATE: If activeBass is weak, force it to zero
-          if (activeBass > 0.05) {
-            // JITTER: Random shaking
-            double shake = activeBass * 4.0;
+          // --- BASS PHYSICS ---
+          if (activeBass > 0.001) {
+            // 1. VIBRATION (Low Energy Response)
+            // At low volume, they just wiggle.
+            double shake = activeBass * 2.0;
             p.vx += (_rng.nextDouble() - 0.5) * shake;
             p.vy += (_rng.nextDouble() - 0.5) * shake;
 
-            // EXPLOSION: Only apply huge upward force on peak beats
-            // 20.0 is a massive force, but it only happens at peak volume
-            if (_rng.nextDouble() < 0.2) {
+            // 2. THE JUMP (High Energy Response)
+            // We use the 'activeBass' multiplier on the Jump Force.
+            // Low vol (0.1) -> Jump Force 2.5 (Tiny hop)
+            // High vol (1.0) -> Jump Force 25.0 (Huge launch)
+            if (activeBass > 0.5 &&
+                _rng.nextDouble() < (0.1 + activeBass * 0.0001)) {
+              // The force is now DYNAMIC, not fixed.
               p.vy -= (activeBass * 20.0);
             }
 
-            p.targetRadius = (10.0 * activeBass) + 2.0;
+            p.targetRadius = (5.0 * activeBass) + 2.0;
           } else {
-            // Dead still if no beat
-            p.targetRadius = 2.0;
+            p.targetRadius = 1.0;
           }
 
-          // Flash Color
           p.color = Color.lerp(p.baseColor, Colors.white, activeBass)!;
-        }
-        // --- TREBLE PARTICLES ---
-        else {
-          // (Keep existing treble logic, it's fine)
-          if (activeTreble > 0.1) {
+        } else {
+          // --- TREBLE PHYSICS ---
+          if (activeTreble > 0.05) {
             p.vx += (_rng.nextDouble() - 0.5) * 1.5;
             p.vy += (_rng.nextDouble() - 0.5) * 1.5;
             p.color = Color.lerp(
-              Colors.orange,
+              Colors.orangeAccent,
               Colors.purpleAccent,
               activeTreble,
             )!;
-            p.targetRadius = (3.0 * activeTreble) + 1.5;
+            p.targetRadius = (5.0 * activeTreble) + 1.5;
           } else {
             p.color = p.baseColor;
             p.targetRadius = 1.5;
           }
         }
 
-        // Apply Velocity
+        // --- KINEMATICS ---
         p.x += p.vx;
         p.y += p.vy;
+        p.radius += (p.targetRadius - p.radius) * 0.15;
 
-        // Radius Spring
-        p.radius += (p.targetRadius - p.radius) * 0.2;
+        // FRICTION
+        p.vx *= 0.88;
+        p.vy *= 0.88;
 
-        // 3. HIGH FRICTION (The "Stop" Mechanism)
-        // Changed from 0.92 to 0.85
-        // This makes them lose speed VERY fast. They jump, then freeze.
-        p.vx *= 0.85;
-        p.vy *= 0.85;
-
-        // Boundaries (Floor Bounce)
+        // BOUNDARIES
         double width = MediaQuery.of(context).size.width;
         double height = MediaQuery.of(context).size.height;
 
         if (p.y > height) {
           p.y = height;
-          p.vy = -p.vy * 0.4; // Low bounce factor (heavy particles)
+          p.vy = -p.vy * 0.3; // Dampen floor bounce
         }
         if (p.y < 0) {
           p.y = 0;
@@ -222,7 +236,6 @@ class _KineticVoidPageState extends State<KineticVoidPage>
     });
   }
 
-  // Helper for absolute value
   double abs(double v) => v > 0 ? v : -v;
 
   @override
@@ -241,6 +254,8 @@ class _KineticVoidPageState extends State<KineticVoidPage>
     );
   }
 }
+
+// --- DATA CLASSES ---
 
 class Particle {
   double x, y, vx = 0, vy = 0, radius, targetRadius;
@@ -265,20 +280,19 @@ class VoidPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     for (var p in particles) {
+      // 1. Draw Glow (Only if particle is active/large)
       if (p.radius > 2.5) {
         canvas.drawCircle(
           Offset(p.x, p.y),
-          p.radius * 2.0,
+          p.radius * 2.5,
           Paint()..color = p.color.withOpacity(0.3),
         );
       }
-      canvas.drawCircle(
-        Offset(p.x, p.y),
-        p.radius,
-        Paint()
-          ..color = p.color
-          ..style = PaintingStyle.fill,
-      );
+      // 2. Draw Core
+      final paint = Paint()
+        ..color = p.color
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(Offset(p.x, p.y), p.radius, paint);
     }
   }
 
